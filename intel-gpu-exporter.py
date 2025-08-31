@@ -6,6 +6,21 @@ import subprocess
 import json
 import logging
 
+# Engine key compatibility helper (MTL/Xe vs legacy /0 keys)
+# Returns first present value from candidate engine keys and coerces to float.
+def eng_val(data, names, field):
+    e = data.get("engines", {})
+    for n in names:
+        v = e.get(n, {}).get(field)
+        if v is not None:
+            try:
+                return float(v)
+            except Exception:
+                pass
+    return 0.0
+
+
+
 igpu_device_id = Gauge(
     "igpu_device_id", "Intel GPU device id"
 )
@@ -68,43 +83,43 @@ igpu_rc6 = Gauge("igpu_rc6", "RC6 %")
 
 def update(data):
     igpu_engines_blitter_0_busy.set(
-        data.get("engines", {}).get("Blitter/0", {}).get("busy", 0.0)
+        eng_val(data, ["Blitter/0", "Blitter"], "busy")
     )
     igpu_engines_blitter_0_sema.set(
-        data.get("engines", {}).get("Blitter/0", {}).get("sema", 0.0)
+        eng_val(data, ["Blitter/0", "Blitter"], "sema")
     )
     igpu_engines_blitter_0_wait.set(
-        data.get("engines", {}).get("Blitter/0", {}).get("wait", 0.0)
+        eng_val(data, ["Blitter/0", "Blitter"], "wait")
     )
 
     igpu_engines_render_3d_0_busy.set(
-        data.get("engines", {}).get("Render/3D/0", {}).get("busy", 0.0)
+        eng_val(data, ["Render/3D/0", "Render/3D"], "busy")
     )
     igpu_engines_render_3d_0_sema.set(
-        data.get("engines", {}).get("Render/3D/0", {}).get("sema", 0.0)
+        eng_val(data, ["Render/3D/0", "Render/3D"], "sema")
     )
     igpu_engines_render_3d_0_wait.set(
-        data.get("engines", {}).get("Render/3D/0", {}).get("wait", 0.0)
+        eng_val(data, ["Render/3D/0", "Render/3D"], "wait")
     )
 
     igpu_engines_video_0_busy.set(
-        data.get("engines", {}).get("Video/0", {}).get("busy", 0.0)
+        eng_val(data, ["Video/0", "Video"], "busy")
     )
     igpu_engines_video_0_sema.set(
-        data.get("engines", {}).get("Video/0", {}).get("sema", 0.0)
+        eng_val(data, ["Video/0", "Video"], "sema")
     )
     igpu_engines_video_0_wait.set(
-        data.get("engines", {}).get("Video/0", {}).get("wait", 0.0)
+        eng_val(data, ["Video/0", "Video"], "wait")
     )
 
     igpu_engines_video_enhance_0_busy.set(
-        data.get("engines", {}).get("VideoEnhance/0", {}).get("busy", 0.0)
+        eng_val(data, ["VideoEnhance/0", "VideoEnhance"], "busy")
     )
     igpu_engines_video_enhance_0_sema.set(
-        data.get("engines", {}).get("VideoEnhance/0", {}).get("sema", 0.0)
+        eng_val(data, ["VideoEnhance/0", "VideoEnhance"], "sema")
     )
     igpu_engines_video_enhance_0_wait.set(
-        data.get("engines", {}).get("VideoEnhance/0", {}).get("wait", 0.0)
+        eng_val(data, ["VideoEnhance/0", "VideoEnhance"], "wait")
     )
 
     igpu_frequency_actual.set(data.get("frequency", {}).get("actual", 0))
@@ -151,30 +166,36 @@ if __name__ == "__main__":
     )
 
     logging.info("Started " + cmd)
-    output = ""
-
-    if os.getenv("IS_DOCKER", False):
-        for line in process.stdout:
-            line = line.decode("utf-8").strip()
-            output += line
-
-            try:
-                data = json.loads(output.strip(","))
-                logging.debug(data)
-                update(data)
-                output = ""
-            except json.JSONDecodeError:
-                continue
-    else:
-        while process.poll() is None:
-            read = process.stdout.readline()
-            output += read.decode("utf-8")
-            logging.debug(output)
-            if read == b"},\n":
-                update(json.loads(output[:-2]))
-                output = ""
-
-    process.kill()
+    # Robust streaming JSON parse: bracket-depth framing
+    buf = ''
+    depth = 0
+    started = False
+    while True:
+        chunk = process.stdout.read(4096)
+        if not chunk:
+            break
+        for ch in chunk.decode('utf-8', 'ignore'):
+            if not started:
+                if ch == '{':
+                    started = True
+                    depth = 1
+                    buf = '{'
+            else:
+                buf += ch
+                if ch == '{':
+                    depth += 1
+                elif ch == '}':
+                    depth -= 1
+                    if depth == 0:
+                        try:
+                            data = json.loads(buf)
+                            logging.debug(data)
+                            update(data)
+                        except Exception:
+                            pass
+                        buf = ''
+                        started = False
+process.kill()
 
     if process.returncode != 0:
         logging.error("Error: " + process.stderr.read().decode("utf-8"))
