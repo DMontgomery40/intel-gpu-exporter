@@ -81,61 +81,71 @@ igpu_power_package = Gauge("igpu_power_package", "Package power W")
 igpu_rc6 = Gauge("igpu_rc6", "RC6 %")
 
 
+
 def update(data):
-    igpu_engines_blitter_0_busy.set(
-        eng_val(data, ["Blitter/0", "Blitter"], "busy")
-    )
-    igpu_engines_blitter_0_sema.set(
-        eng_val(data, ["Blitter/0", "Blitter"], "sema")
-    )
-    igpu_engines_blitter_0_wait.set(
-        eng_val(data, ["Blitter/0", "Blitter"], "wait")
-    )
+    # Resolve engine metrics across old/new key formats
+    blit_busy = eng_val(data, ["Blitter/0", "Blitter"], "busy")
+    blit_sema = eng_val(data, ["Blitter/0", "Blitter"], "sema")
+    blit_wait = eng_val(data, ["Blitter/0", "Blitter"], "wait")
+    r3d_busy = eng_val(data, ["Render/3D/0", "Render/3D"], "busy")
+    r3d_sema = eng_val(data, ["Render/3D/0", "Render/3D"], "sema")
+    r3d_wait = eng_val(data, ["Render/3D/0", "Render/3D"], "wait")
+    vid_busy = eng_val(data, ["Video/0", "Video"], "busy")
+    vid_sema = eng_val(data, ["Video/0", "Video"], "sema")
+    vid_wait = eng_val(data, ["Video/0", "Video"], "wait")
+    ven_busy = eng_val(data, ["VideoEnhance/0", "VideoEnhance"], "busy")
+    ven_sema = eng_val(data, ["VideoEnhance/0", "VideoEnhance"], "sema")
+    ven_wait = eng_val(data, ["VideoEnhance/0", "VideoEnhance"], "wait")
 
-    igpu_engines_render_3d_0_busy.set(
-        eng_val(data, ["Render/3D/0", "Render/3D"], "busy")
-    )
-    igpu_engines_render_3d_0_sema.set(
-        eng_val(data, ["Render/3D/0", "Render/3D"], "sema")
-    )
-    igpu_engines_render_3d_0_wait.set(
-        eng_val(data, ["Render/3D/0", "Render/3D"], "wait")
-    )
+    igpu_engines_blitter_0_busy.set(blit_busy)
+    igpu_engines_blitter_0_sema.set(blit_sema)
+    igpu_engines_blitter_0_wait.set(blit_wait)
 
-    igpu_engines_video_0_busy.set(
-        eng_val(data, ["Video/0", "Video"], "busy")
-    )
-    igpu_engines_video_0_sema.set(
-        eng_val(data, ["Video/0", "Video"], "sema")
-    )
-    igpu_engines_video_0_wait.set(
-        eng_val(data, ["Video/0", "Video"], "wait")
-    )
+    igpu_engines_render_3d_0_busy.set(r3d_busy)
+    igpu_engines_render_3d_0_sema.set(r3d_sema)
+    igpu_engines_render_3d_0_wait.set(r3d_wait)
 
-    igpu_engines_video_enhance_0_busy.set(
-        eng_val(data, ["VideoEnhance/0", "VideoEnhance"], "busy")
-    )
-    igpu_engines_video_enhance_0_sema.set(
-        eng_val(data, ["VideoEnhance/0", "VideoEnhance"], "sema")
-    )
-    igpu_engines_video_enhance_0_wait.set(
-        eng_val(data, ["VideoEnhance/0", "VideoEnhance"], "wait")
-    )
+    igpu_engines_video_0_busy.set(vid_busy)
+    igpu_engines_video_0_sema.set(vid_sema)
+    igpu_engines_video_0_wait.set(vid_wait)
+
+    igpu_engines_video_enhance_0_busy.set(ven_busy)
+    igpu_engines_video_enhance_0_sema.set(ven_sema)
+    igpu_engines_video_enhance_0_wait.set(ven_wait)
 
     igpu_frequency_actual.set(data.get("frequency", {}).get("actual", 0))
     igpu_frequency_requested.set(data.get("frequency", {}).get("requested", 0))
-
     igpu_imc_bandwidth_reads.set(data.get("imc-bandwidth", {}).get("reads", 0))
     igpu_imc_bandwidth_writes.set(data.get("imc-bandwidth", {}).get("writes", 0))
-
     igpu_interrupts.set(data.get("interrupts", {}).get("count", 0))
-
     igpu_period.set(data.get("period", {}).get("duration", 0))
-
     igpu_power_gpu.set(data.get("power", {}).get("GPU", 0))
     igpu_power_package.set(data.get("power", {}).get("Package", 0))
 
-    igpu_rc6.set(data.get("rc6", {}).get("value", 0))
+    # RC6 percent (0-100)
+    try:
+        rc6_value = float(data.get("rc6", {}).get("value", 0) or 0)
+    except Exception:
+        rc6_value = 0.0
+    igpu_rc6.set(rc6_value)
+
+    # Optional fallback: derive non-idle percent from RC6 for targets with zero busy
+    try:
+        fb = os.getenv("FALLBACK_FROM_RC6", "0").lower() in ("1","true","yes","on")
+        targets = [t.strip() for t in os.getenv("FALLBACK_TARGETS", "Video").split(',') if t.strip()]
+    except Exception:
+        fb = False
+        targets = []
+    if fb:
+        active = max(0.0, 100.0 - rc6_value)
+        if "Video" in targets and vid_busy <= 0:
+            igpu_engines_video_0_busy.set(active)
+        if ("Render/3D" in targets or "Render" in targets) and r3d_busy <= 0:
+            igpu_engines_render_3d_0_busy.set(active)
+        if "Blitter" in targets and blit_busy <= 0:
+            igpu_engines_blitter_0_busy.set(active)
+        if "VideoEnhance" in targets and ven_busy <= 0:
+            igpu_engines_video_enhance_0_busy.set(active)
 
 
 if __name__ == "__main__":
@@ -155,8 +165,8 @@ if __name__ == "__main__":
     ).communicate()
     out = out.decode()
 
-    device_id = "0x" + re.search(r"device=(\w+)", out.splitlines()[0]).groups()[0]
-    device_id = int(device_id, 16)
+    m = re.search(r"(?:device0|device)=(\w+)", out) or re.search(r"pci:vendor=\w+,device=(\w+)", out)
+    device_id = int("0x" + m.group(1), 16) if m else 0
 
     igpu_device_id.set(device_id)
 
@@ -195,7 +205,7 @@ if __name__ == "__main__":
                             pass
                         buf = ''
                         started = False
-process.kill()
+    process.kill()
 
     if process.returncode != 0:
         logging.error("Error: " + process.stderr.read().decode("utf-8"))
